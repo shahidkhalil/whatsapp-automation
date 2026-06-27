@@ -1,0 +1,83 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "check_availability",
+      "description": "Find open appointment slots. Call when the patient wants to book or asks what times are available. Do not invent slots — this returns real availability.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "date": { "type": ["string", "null"], "description": "Target date YYYY-MM-DD, or null if the patient didn't specify one" },
+          "time_preference": { "type": "string", "enum": ["morning", "afternoon", "evening", "any"] },
+          "service_type": { "type": ["string", "null"], "description": "e.g. cleaning, consultation; null if unknown" },
+          "provider_name": { "type": ["string", "null"] }
+        },
+        "required": ["date", "time_preference", "service_type", "provider_name"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "book_appointment",
+      "description": "Book a specific slot the patient has explicitly confirmed. Only call after check_availability and an explicit confirmation.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "scheduled_at": { "type": "string", "description": "ISO 8601 start time with timezone offset" },
+          "service_type": { "type": "string" },
+          "provider_name": { "type": ["string", "null"] }
+        },
+        "required": ["scheduled_at", "service_type", "provider_name"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "reschedule_appointment",
+      "description": "Move an existing appointment to a new confirmed time.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "appointment_id": { "type": ["string", "null"], "description": "Known appointment id, or null to look up" },
+          "new_scheduled_at": { "type": "string", "description": "ISO 8601 start time with timezone offset" }
+        },
+        "required": ["appointment_id", "new_scheduled_at"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "cancel_appointment",
+      "description": "Cancel an existing appointment.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "appointment_id": { "type": ["string", "null"], "description": "Known appointment id, or null to look up" }
+        },
+        "required": ["appointment_id"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "escalate_to_human",
+      "description": "Hand the conversation to clinic staff. Call for emergencies, explicit requests for a person, or when you cannot help.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "reason": { "type": "string", "description": "Short reason for the handoff" }
+        },
+        "required": ["reason"]
+      }
+    }
+  }
+]

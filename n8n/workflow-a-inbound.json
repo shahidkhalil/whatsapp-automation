@@ -1,0 +1,300 @@
+{
+  "name": "WhatsApp Clinic - Inbound (Stage 1)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "whatsapp",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-verify",
+      "name": "Webhook Verify",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -600,
+        -200
+      ],
+      "webhookId": "wa-verify"
+    },
+    {
+      "parameters": {
+        "jsCode": "const q = ($input.first().json.query) || {};\nlet challenge = 'forbidden';\nif (q['hub.mode'] === 'subscribe' && q['hub.verify_token'] === $env.WHATSAPP_VERIFY_TOKEN) { challenge = q['hub.challenge']; }\nreturn [{ json: { challenge } }];"
+      },
+      "id": "verify",
+      "name": "Verify",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -380,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.challenge }}",
+        "options": {}
+      },
+      "id": "respond-verify",
+      "name": "Respond Verify",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        -160,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-inbound",
+      "name": "Webhook Inbound",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -600,
+        80
+      ],
+      "webhookId": "wa-inbound"
+    },
+    {
+      "parameters": {
+        "jsCode": "const inp = $input.first().json;\nconst body = inp.body || inp;\nlet out = { isMessage: false };\ntry {\n  const value = body.entry && body.entry[0] && body.entry[0].changes && body.entry[0].changes[0] && body.entry[0].changes[0].value;\n  const msg = value && value.messages && value.messages[0];\n  if (msg) {\n    out = { isMessage: true,\n      phone_number_id: value.metadata && value.metadata.phone_number_id,\n      from: msg.from, msgId: msg.id,\n      text: (msg.text && msg.text.body) || (msg.button && msg.button.text) || (msg.interactive && msg.interactive.button_reply && msg.interactive.button_reply.title) || '' };\n  }\n} catch (e) {}\nreturn [{ json: out }];"
+      },
+      "id": "parse",
+      "name": "Parse",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -380,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "EVENT_RECEIVED",
+        "options": {}
+      },
+      "id": "respond-200",
+      "name": "Respond 200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        -160,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const p = $('Parse').first().json;\nif (!p.isMessage) return [];\nconst esc = (s) => String(s == null ? '' : s).replace(/'/g, \"''\");\nconst pnid = esc(p.phone_number_id);\nconst from = esc(p.from);\nconst sql = `\nwith cl as (select id, name, timezone, google_calendar_id from clinics where phone_number_id = '${pnid}'),\npat as (insert into patients (clinic_id, whatsapp_number) select cl.id, '${from}' from cl\n  on conflict (clinic_id, whatsapp_number) do update set whatsapp_number = excluded.whatsapp_number returning id, clinic_id),\ncon as (insert into conversations (clinic_id, patient_id, status, last_message_at) select pat.clinic_id, pat.id, 'bot', now() from pat\n  on conflict (clinic_id, patient_id) do update set last_message_at = now() returning id, status)\nselect cl.name as clinic_name, cl.timezone, cl.google_calendar_id, pat.id as patient_id, con.id as conversation_id, con.status\nfrom cl, pat, con;`;\nreturn [{ json: { sql } }];"
+      },
+      "id": "build-context-sql",
+      "name": "Build Context SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -160,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}",
+        "options": {}
+      },
+      "id": "db-context",
+      "name": "DB Context",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        60,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const parse = $('Parse').first().json;\nconst ctx = $('DB Context').first().json || {};\nconst tz = ctx.timezone || 'UTC';\nconst today = new Date().toLocaleDateString('en-CA', { timeZone: tz });\nconst clinic = ctx.clinic_name || 'the clinic';\nconst SYSTEM = `You are the receptionist assistant for {{clinic_name}}, replying to patients on\nWhatsApp. You are not a general-purpose chatbot and not a medical professional.\n\n## Grounding\n- You have **no** clinic-specific facts unless they appear in a **Knowledge base** block\n  in this conversation. Pricing, hours, services, staff, policies, insurance \u2014 state them\n  only if present there. If that block is absent or doesn't cover the question, do **not**\n  guess or fabricate; say a team member will confirm. (E.g. asked for opening hours with\n  no Knowledge base block: \"Let me have a colleague confirm our exact hours and come right\n  back to you\" \u2014 never invent times, prices, or services.)\n- You may answer general health-education questions from your own knowledge, but mark\n  them clearly as general information \u2014 never advice tailored to this patient, never a\n  diagnosis.\n- Never claim to remember a patient or a prior visit unless the patient context says so.\n  Never claim personal experience or opinions.\n\n## Tone (\u00a74.7)\n- Warm, professional, concise. Vary phrasing \u2014 don't sound templated.\n- If the patient mentions pain, anxiety, or discomfort, open with a brief, genuine\n  acknowledgment before logistics.\n- Never argue with or contradict an upset patient \u2014 escalate instead.\n\n## How to respond\n- To **check availability, book, reschedule, cancel, or hand off to staff, call the\n  provided function** (\\`check_availability\\`, \\`book_appointment\\`, \\`reschedule_appointment\\`,\n  \\`cancel_appointment\\`, \\`escalate_to_human\\`). Don't describe the action in prose and don't\n  claim it's done until the function result comes back.\n- For anything else, reply in natural language.\n- Only call \\`book_appointment\\` for a time the patient explicitly confirmed; call\n  \\`check_availability\\` first to find times, then present the options the system returns.\n- Never invent availability \u2014 slots come from the system, not from you.\n\nThe exact function schemas live in \\`prompts/actions.json\\` (passed to the model as tools).\n\n## After an action runs\nThe system executes the action and returns the result (available slots, or a booking\nconfirmation). Phrase that outcome naturally. For availability, offer **2\u20134 concrete\noptions** and ask the patient to pick one. Split long replies into 2\u20133 shorter messages.`.replace(/\\{\\{clinic_name\\}\\}/g, clinic);\nconst dated = `Current date: ${today} (timezone ${tz}). When the patient names a weekday like \"Tuesday\", resolve it to the next such date from today.\\n\\n` + SYSTEM;\nconst tools = [{\"type\": \"function\", \"function\": {\"name\": \"check_availability\", \"description\": \"Find open appointment slots. Call when the patient wants to book or asks what times are available. Do not invent slots \\u2014 this returns real availability.\", \"parameters\": {\"type\": \"object\", \"additionalProperties\": false, \"properties\": {\"date\": {\"type\": [\"string\", \"null\"], \"description\": \"Target date YYYY-MM-DD, or null if the patient didn't specify one\"}, \"time_preference\": {\"type\": \"string\", \"enum\": [\"morning\", \"afternoon\", \"evening\", \"any\"]}, \"service_type\": {\"type\": [\"string\", \"null\"], \"description\": \"e.g. cleaning, consultation; null if unknown\"}, \"provider_name\": {\"type\": [\"string\", \"null\"]}}, \"required\": [\"date\", \"time_preference\", \"service_type\", \"provider_name\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"book_appointment\", \"description\": \"Book a specific slot the patient has explicitly confirmed. Only call after check_availability and an explicit confirmation.\", \"parameters\": {\"type\": \"object\", \"additionalProperties\": false, \"properties\": {\"scheduled_at\": {\"type\": \"string\", \"description\": \"ISO 8601 start time with timezone offset\"}, \"service_type\": {\"type\": \"string\"}, \"provider_name\": {\"type\": [\"string\", \"null\"]}}, \"required\": [\"scheduled_at\", \"service_type\", \"provider_name\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"reschedule_appointment\", \"description\": \"Move an existing appointment to a new confirmed time.\", \"parameters\": {\"type\": \"object\", \"additionalProperties\": false, \"properties\": {\"appointment_id\": {\"type\": [\"string\", \"null\"], \"description\": \"Known appointment id, or null to look up\"}, \"new_scheduled_at\": {\"type\": \"string\", \"description\": \"ISO 8601 start time with timezone offset\"}}, \"required\": [\"appointment_id\", \"new_scheduled_at\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"cancel_appointment\", \"description\": \"Cancel an existing appointment.\", \"parameters\": {\"type\": \"object\", \"additionalProperties\": false, \"properties\": {\"appointment_id\": {\"type\": [\"string\", \"null\"], \"description\": \"Known appointment id, or null to look up\"}}, \"required\": [\"appointment_id\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"escalate_to_human\", \"description\": \"Hand the conversation to clinic staff. Call for emergencies, explicit requests for a person, or when you cannot help.\", \"parameters\": {\"type\": \"object\", \"additionalProperties\": false, \"properties\": {\"reason\": {\"type\": \"string\", \"description\": \"Short reason for the handoff\"}}, \"required\": [\"reason\"]}}}];\nconst bodyObj = { model: 'gpt-4o-mini', temperature: 0.3,\n  messages: [ { role: 'system', content: dated }, { role: 'user', content: parse.text } ],\n  tools: tools, tool_choice: 'auto' };\nreturn [{ json: { body: bodyObj } }];"
+      },
+      "id": "build-openai-request",
+      "name": "Build OpenAI Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        280,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body }}",
+        "options": {}
+      },
+      "id": "openai",
+      "name": "OpenAI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        500,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $input.first().json;\nconst parse = $('Parse').first().json;\nconst msg = (r.choices && r.choices[0] && r.choices[0].message) || {};\nlet reply;\nif (msg.tool_calls && msg.tool_calls.length) {\n  const name = msg.tool_calls[0].function.name;\n  reply = (name === 'escalate_to_human')\n    ? \"I'm getting a team member to help you right away \u2014 they'll reply here shortly.\"\n    : \"Let me check our calendar and get right back to you \ud83d\ude42\";\n} else { reply = msg.content || \"Sorry, could you say that another way?\"; }\nreturn [{ json: { to: parse.from, reply: reply, phone_number_id: parse.phone_number_id } }];"
+      },
+      "id": "route",
+      "name": "Route",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v21.0/{{ $json.phone_number_id }}/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: 'whatsapp', to: $json.to, type: 'text', text: { body: $json.reply } }) }}",
+        "options": {}
+      },
+      "id": "whatsapp-send",
+      "name": "WhatsApp Send",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        940,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook Verify": {
+      "main": [
+        [
+          {
+            "node": "Verify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify": {
+      "main": [
+        [
+          {
+            "node": "Respond Verify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Inbound": {
+      "main": [
+        [
+          {
+            "node": "Parse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse": {
+      "main": [
+        [
+          {
+            "node": "Respond 200",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build Context SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Context SQL": {
+      "main": [
+        [
+          {
+            "node": "DB Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB Context": {
+      "main": [
+        [
+          {
+            "node": "Build OpenAI Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build OpenAI Request": {
+      "main": [
+        [
+          {
+            "node": "OpenAI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI": {
+      "main": [
+        [
+          {
+            "node": "Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route": {
+      "main": [
+        [
+          {
+            "node": "WhatsApp Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "id": "yYwxvFpU4BEnBWV6"
+}

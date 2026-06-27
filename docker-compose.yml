@@ -1,0 +1,63 @@
+# Local dev stack (Spec §9): n8n workflow engine + ngrok tunnel.
+# Database is Supabase cloud (not here) per spec — pgvector comes preconfigured.
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - GENERIC_TIMEZONE=${TZ:-Asia/Karachi}
+      - TZ=${TZ:-Asia/Karachi}
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=${WEBHOOK_URL:-}
+      - N8N_RUNNERS_ENABLED=true
+      - N8N_DIAGNOSTICS_ENABLED=false
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+  # Optional: public tunnel so Meta can reach the local n8n webhook (§9).
+  # Needs NGROK_AUTHTOKEN in .env. Start with: docker compose up -d ngrok
+  # Inspect the public URL at http://localhost:4040
+  ngrok:
+    image: ngrok/ngrok:latest
+    restart: unless-stopped
+    command: http n8n:5678
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
+    ports:
+      - "4040:4040"
+    depends_on:
+      - n8n
+
+  # Postgres + pgvector — local stand-in for Supabase cloud (dev only, §9).
+  # db/schema.sql is auto-applied on first boot. Portable to Supabase cloud
+  # later: point n8n's Postgres credentials at the cloud connection string.
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB:-clinic}
+    ports:
+      - "5433:5432"   # 5433 on host: 5432 is taken by the dental_ehr_db container
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+
+  # Lightweight DB dashboard at http://localhost:8080 (server: db, creds from .env).
+  adminer:
+    image: adminer:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+
+volumes:
+  n8n_data:
+  db_data:
