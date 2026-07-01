@@ -63,6 +63,29 @@ Import the two workflow JSONs into n8n (Workflows → Import from file), attach 
 Postgres / Anthropic / OpenAI / WhatsApp / Google Calendar credentials, then
 activate them.
 
+## Try it without WhatsApp — local chat tester
+A browser chat UI that runs the **same inbound pipeline** (find-or-create,
+triage, emergency, disclosure, RAG, Claude tool-calling, booking) against the
+local Postgres — no Meta, ngrok, or n8n needed. Google Calendar is *simulated*
+(appointments are written to the DB), which is the only difference from prod.
+
+```bash
+docker compose up -d db            # or any Postgres+pgvector on :5433
+cp .env.example .env               # add ANTHROPIC_API_KEY + OPENAI_API_KEY for real replies
+npm install
+npm run webchat                    # → http://localhost:3000
+```
+
+Open the page, type as if you were a patient. The right panel shows the live
+pipeline: route (bot/emergency/human), RAG hits with similarity, and any tool
+call + result. **Reset conversation** clears the test patient so the first-time
+disclosure fires again. Without keys the DB/triage/emergency/disclosure flow
+still works and the panel tells you which keys are missing.
+
+Quick messages to try: *"What are your opening hours?"* (RAG), *"Can I book
+Tuesday afternoon?"* (booking tool), *"I have severe pain and swelling"*
+(emergency), *"Can I speak to a person?"* (handoff).
+
 ## Credentials
 Setup steps for the LLM key, Google Calendar OAuth, and WhatsApp Cloud API are in
 [docs/credentials-setup.md](docs/credentials-setup.md).

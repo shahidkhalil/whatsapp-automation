@@ -8,7 +8,8 @@
     "test": "node scripts/test/validate.mjs && node scripts/test/sql.mjs",
     "test:offline": "node scripts/test/validate.mjs",
     "test:sql": "node scripts/test/sql.mjs",
-    "load-kb": "node scripts/load-knowledge-base.mjs"
+    "load-kb": "node scripts/load-knowledge-base.mjs",
+    "webchat": "node scripts/webchat/server.mjs"
   },
   "dependencies": {
     "pg": "^8.13.1"
