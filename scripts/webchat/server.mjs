@@ -35,7 +35,14 @@ try {
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY || '';
 const OPENAI_KEY = process.env.OPENAI_API_KEY || '';
 const MODEL = process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5';
+const OPENAI_CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || 'gpt-4o-mini';
 const EMBED_MODEL = process.env.EMBEDDING_MODEL || 'text-embedding-3-small';
+// Generation provider: LLM_PROVIDER=anthropic|openai, else auto (Claude if its
+// key is set, otherwise ChatGPT). Embeddings always use OpenAI.
+const PROVIDER = (process.env.LLM_PROVIDER
+  || (ANTHROPIC_KEY ? 'anthropic' : (OPENAI_KEY ? 'openai' : 'none'))).toLowerCase();
+const HAS_LLM = Boolean((PROVIDER === 'anthropic' && ANTHROPIC_KEY) || (PROVIDER === 'openai' && OPENAI_KEY));
+const GEN_LABEL = PROVIDER === 'anthropic' ? MODEL : PROVIDER === 'openai' ? OPENAI_CHAT_MODEL : 'none';
 const CLINIC_PHONE_ID = process.env.TEST_CLINIC_PHONE_ID || '1114486611757569'; // db/seed.sql
 const PORT = Number(process.env.WEBCHAT_PORT || 3000);
 
@@ -115,14 +122,60 @@ Phrase the result naturally. For availability, offer 2–4 concrete options and 
 Current date: ${today} (timezone ${tz}). is_returning: ${!!ctx.is_returning}.`;
 }
 
-async function claude(body) {
+// --- generation: Claude (Messages API) OR ChatGPT (Chat Completions) ------
+// Both expose the same normalized turn: a text reply or a single tool call,
+// plus llmPhrase() to turn a tool result into the final natural reply.
+async function anthropicTurn(system, messages, tools) {
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
-    body: JSON.stringify(body),
+    body: JSON.stringify(Object.assign({ model: MODEL, max_tokens: 700, system, messages }, tools ? { tools, tool_choice: { type: 'auto' } } : {})),
   });
   if (!res.ok) throw new Error(`Anthropic ${res.status}: ${await res.text()}`);
   return res.json();
+}
+async function openaiTurn(messages, tools) {
+  const oaTools = tools && tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } }));
+  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${OPENAI_KEY}` },
+    body: JSON.stringify(Object.assign({ model: OPENAI_CHAT_MODEL, max_tokens: 700, messages }, oaTools ? { tools: oaTools, tool_choice: 'auto' } : {})),
+  });
+  if (!res.ok) throw new Error(`OpenAI ${res.status}: ${await res.text()}`);
+  return res.json();
+}
+
+// history: [{role:'user'|'assistant', content}]. Returns {kind:'text',text} or
+// {kind:'tool', id, name, input, ...thread} carrying what llmPhrase needs.
+async function llmComplete({ system, history, userText, tools }) {
+  if (PROVIDER === 'anthropic') {
+    const messages = [...history, { role: 'user', content: userText }];
+    const r = await anthropicTurn(system, messages, tools);
+    const tu = (r.content || []).find((b) => b.type === 'tool_use');
+    if (r.stop_reason === 'tool_use' && tu) return { kind: 'tool', id: tu.id, name: tu.name, input: tu.input || {}, _a: { messages, assistant: r.content } };
+    const t = (r.content || []).find((b) => b.type === 'text');
+    return { kind: 'text', text: (t && t.text) || '' };
+  }
+  const messages = [{ role: 'system', content: system }, ...history, { role: 'user', content: userText }];
+  const r = await openaiTurn(messages, tools);
+  const m = r.choices[0].message;
+  if (m.tool_calls && m.tool_calls.length) {
+    const tc = m.tool_calls[0];
+    let input = {}; try { input = JSON.parse(tc.function.arguments || '{}'); } catch { /* leave {} */ }
+    return { kind: 'tool', id: tc.id, name: tc.function.name, input, _o: { messages, assistant: m } };
+  }
+  return { kind: 'text', text: m.content || '' };
+}
+async function llmPhrase(prev, toolResult) {
+  if (PROVIDER === 'anthropic') {
+    const r = await anthropicTurn(
+      'You are the clinic receptionist assistant. Phrase the tool result naturally and warmly for WhatsApp. For availability, list the options and ask the patient to pick one. Keep it concise.',
+      [...prev._a.messages, { role: 'assistant', content: prev._a.assistant }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: prev.id, content: JSON.stringify(toolResult) }] }], null);
+    const t = (r.content || []).find((b) => b.type === 'text');
+    return (t && t.text) || 'Done — anything else?';
+  }
+  const r = await openaiTurn([...prev._o.messages, prev._o.assistant, { role: 'tool', tool_call_id: prev.id, content: JSON.stringify(toolResult) }], null);
+  return r.choices[0].message.content || 'Done — anything else?';
 }
 
 // Simulated Google Calendar availability: clinic-hours slots on the target date.
@@ -211,38 +264,30 @@ async function handleMessage(from, text) {
   } else debug.steps.push('RAG skipped (no OPENAI_API_KEY)');
   debug.rag = kbRows.map((r) => ({ category: r.category, similarity: Number(r.similarity).toFixed(3), content: r.content.slice(0, 80) }));
 
-  if (!ANTHROPIC_KEY) {
-    const reply = `(no ANTHROPIC_API_KEY set — Claude reply stubbed. Triage=${debug.route}, RAG hits=${kbRows.length}. Set the key in .env to get real answers.)`;
+  if (!HAS_LLM) {
+    const reply = `(no LLM key — reply stubbed. Triage=${debug.route}, RAG hits=${kbRows.length}. Set OPENAI_API_KEY (ChatGPT) or ANTHROPIC_API_KEY in .env for real answers.)`;
     return { reply: (disclosure ? disclosure + '\n\n' : '') + reply, debug };
   }
+  debug.provider = `${PROVIDER} (${GEN_LABEL})`;
 
   const history = (ctx.history || []).map((m) => ({ role: m.role === 'patient' ? 'user' : 'assistant', content: m.content }));
-  const messages = [...history, { role: 'user', content: text }];
-  const first = await claude({ model: MODEL, max_tokens: 700, system: buildSystem(ctx, kbRows), messages, tools: TOOLS, tool_choice: { type: 'auto' } });
+  const first = await llmComplete({ system: buildSystem(ctx, kbRows), history, userText: text, tools: TOOLS });
 
-  const toolUse = (first.content || []).find((b) => b.type === 'tool_use');
-  if (first.stop_reason === 'tool_use' && toolUse) {
-    debug.tool = { name: toolUse.name, input: toolUse.input };
-    const result = await runAction(ctx, toolUse);
+  if (first.kind === 'tool') {
+    debug.tool = { name: first.name, input: first.input };
+    const result = await runAction(ctx, { name: first.name, input: first.input });
     debug.action_result = result;
-    if (toolUse.name === 'escalate_to_human') {
+    if (first.name === 'escalate_to_human') {
       const reply = "I'm connecting you with a team member now — they'll reply here shortly.";
       await logBot(reply);
       return { reply: (disclosure ? disclosure + '\n\n' : '') + reply, debug };
     }
-    const second = await claude({
-      model: MODEL, max_tokens: 500,
-      system: 'You are the clinic receptionist assistant. Phrase the tool result naturally and warmly for WhatsApp. For availability, list the options and ask the patient to pick one. Keep it concise.',
-      messages: [...messages, { role: 'assistant', content: first.content }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUse.id, content: JSON.stringify(result) }] }],
-    });
-    const txt = (second.content || []).find((b) => b.type === 'text');
-    const reply = (txt && txt.text) || 'Done — anything else?';
+    const reply = (await llmPhrase(first, result)) || 'Done — anything else?';
     await logBot(reply);
     return { reply: (disclosure ? disclosure + '\n\n' : '') + reply, debug };
   }
 
-  const txt = (first.content || []).find((b) => b.type === 'text');
-  const reply = (txt && txt.text) || 'Sorry, could you say that another way?';
+  const reply = first.text || 'Sorry, could you say that another way?';
   await logBot(reply);
   return { reply: (disclosure ? disclosure + '\n\n' : '') + reply, debug };
 }
@@ -261,7 +306,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'GET' && req.url === '/api/health') {
       res.writeHead(200, { 'content-type': 'application/json' });
-      return res.end(JSON.stringify({ ok: true, anthropic: !!ANTHROPIC_KEY, openai: !!OPENAI_KEY, clinic_phone_id: CLINIC_PHONE_ID }));
+      return res.end(JSON.stringify({ ok: true, provider: PROVIDER, gen_model: GEN_LABEL, has_llm: HAS_LLM, rag: !!OPENAI_KEY, clinic_phone_id: CLINIC_PHONE_ID }));
     }
     if (req.method === 'POST' && (req.url === '/api/message' || req.url === '/api/reset')) {
       let raw = '';
@@ -282,6 +327,6 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log(`\n  Clinic bot tester → http://localhost:${PORT}`);
   console.log(`  DB:        ${connectionString.replace(/:[^:@/]*@/, ':***@')}`);
-  console.log(`  Anthropic: ${ANTHROPIC_KEY ? 'key set (' + MODEL + ')' : 'NO KEY (replies stubbed)'}`);
-  console.log(`  OpenAI:    ${OPENAI_KEY ? 'key set (' + EMBED_MODEL + ')' : 'NO KEY (RAG skipped)'}\n`);
+  console.log(`  Generation: ${HAS_LLM ? PROVIDER + ' (' + GEN_LABEL + ')' : 'NO LLM KEY (replies stubbed)'}`);
+  console.log(`  RAG:        ${OPENAI_KEY ? 'OpenAI (' + EMBED_MODEL + ')' : 'NO OPENAI KEY (RAG skipped)'}\n`);
 });

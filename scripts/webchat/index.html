@@ -75,7 +75,7 @@ function sys(text){ const d=document.createElement('div'); d.className='sys'; d.
 async function health(){
   try { const h = await (await fetch('/api/health')).json();
     document.getElementById('status').textContent =
-      (h.anthropic?'Claude ✓':'Claude ✗ (stub)') + ' · ' + (h.openai?'RAG ✓':'RAG ✗');
+      (h.has_llm ? h.provider + ' · ' + h.gen_model : 'no LLM key (stub)') + ' · ' + (h.rag ? 'RAG ✓' : 'RAG ✗');
   } catch { document.getElementById('status').textContent = 'server unreachable'; }
 }
 health();

@@ -71,10 +71,16 @@ local Postgres — no Meta, ngrok, or n8n needed. Google Calendar is *simulated*
 
 ```bash
 docker compose up -d db            # or any Postgres+pgvector on :5433
-cp .env.example .env               # add ANTHROPIC_API_KEY + OPENAI_API_KEY for real replies
+cp .env.example .env               # add an LLM key (see below) for real replies
 npm install
 npm run webchat                    # → http://localhost:3000
 ```
+
+**LLM provider:** generation works with **either** an OpenAI (ChatGPT) key **or**
+an Anthropic key — `LLM_PROVIDER=auto` uses Claude if `ANTHROPIC_API_KEY` is set,
+otherwise ChatGPT (`OPENAI_CHAT_MODEL`, default `gpt-4o-mini`). RAG embeddings
+always use OpenAI, so **one OpenAI key covers both** generation and RAG. Set
+`OPENAI_API_KEY` in `.env` and you're done.
 
 Open the page, type as if you were a patient. The right panel shows the live
 pipeline: route (bot/emergency/human), RAG hits with similarity, and any tool
