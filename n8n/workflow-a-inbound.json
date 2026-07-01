@@ -1,21 +1,13 @@
 {
-  "name": "WhatsApp Clinic - Inbound (Stage 1)",
+  "name": "WhatsApp Clinic - Inbound",
   "nodes": [
     {
-      "parameters": {
-        "httpMethod": "GET",
-        "path": "whatsapp",
-        "responseMode": "responseNode",
-        "options": {}
-      },
+      "parameters": { "httpMethod": "GET", "path": "whatsapp", "responseMode": "responseNode", "options": {} },
       "id": "webhook-verify",
       "name": "Webhook Verify",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [
-        -600,
-        -200
-      ],
+      "position": [-820, -240],
       "webhookId": "wa-verify"
     },
     {
@@ -26,144 +18,268 @@
       "name": "Verify",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        -380,
-        -200
-      ]
+      "position": [-600, -240]
     },
     {
-      "parameters": {
-        "respondWith": "text",
-        "responseBody": "={{ $json.challenge }}",
-        "options": {}
-      },
+      "parameters": { "respondWith": "text", "responseBody": "={{ $json.challenge }}", "options": {} },
       "id": "respond-verify",
       "name": "Respond Verify",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [
-        -160,
-        -200
-      ]
+      "position": [-380, -240]
     },
     {
-      "parameters": {
-        "httpMethod": "POST",
-        "path": "whatsapp",
-        "responseMode": "responseNode",
-        "options": {}
-      },
+      "parameters": { "httpMethod": "POST", "path": "whatsapp", "responseMode": "responseNode", "options": {} },
       "id": "webhook-inbound",
       "name": "Webhook Inbound",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [
-        -600,
-        80
-      ],
+      "position": [-820, 60],
       "webhookId": "wa-inbound"
     },
     {
       "parameters": {
-        "jsCode": "const inp = $input.first().json;\nconst body = inp.body || inp;\nlet out = { isMessage: false };\ntry {\n  const value = body.entry && body.entry[0] && body.entry[0].changes && body.entry[0].changes[0] && body.entry[0].changes[0].value;\n  const msg = value && value.messages && value.messages[0];\n  if (msg) {\n    out = { isMessage: true,\n      phone_number_id: value.metadata && value.metadata.phone_number_id,\n      from: msg.from, msgId: msg.id,\n      text: (msg.text && msg.text.body) || (msg.button && msg.button.text) || (msg.interactive && msg.interactive.button_reply && msg.interactive.button_reply.title) || '' };\n  }\n} catch (e) {}\nreturn [{ json: out }];"
+        "jsCode": "// Extract sender, message text/button payload, phone_number_id (Spec 6.1).\nconst inp = $input.first().json;\nconst body = inp.body || inp;\nlet out = { isMessage: false };\ntry {\n  const value = body.entry && body.entry[0] && body.entry[0].changes && body.entry[0].changes[0] && body.entry[0].changes[0].value;\n  const msg = value && value.messages && value.messages[0];\n  if (msg) {\n    out = { isMessage: true,\n      phone_number_id: value.metadata && value.metadata.phone_number_id,\n      from: msg.from, msgId: msg.id,\n      text: (msg.text && msg.text.body)\n        || (msg.button && msg.button.text)\n        || (msg.interactive && msg.interactive.button_reply && msg.interactive.button_reply.title)\n        || '' };\n  }\n} catch (e) {}\nreturn [{ json: out }];"
       },
       "id": "parse",
       "name": "Parse",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        -380,
-        80
-      ]
+      "position": [-600, 60]
     },
     {
-      "parameters": {
-        "respondWith": "text",
-        "responseBody": "EVENT_RECEIVED",
-        "options": {}
-      },
+      "parameters": { "respondWith": "text", "responseBody": "EVENT_RECEIVED", "options": {} },
       "id": "respond-200",
       "name": "Respond 200",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [
-        -160,
-        -20
-      ]
+      "position": [-380, -40]
     },
     {
       "parameters": {
-        "jsCode": "const p = $('Parse').first().json;\nif (!p.isMessage) return [];\nconst esc = (s) => String(s == null ? '' : s).replace(/'/g, \"''\");\nconst pnid = esc(p.phone_number_id);\nconst from = esc(p.from);\nconst sql = `\nwith cl as (select id, name, timezone, google_calendar_id from clinics where phone_number_id = '${pnid}'),\npat as (insert into patients (clinic_id, whatsapp_number) select cl.id, '${from}' from cl\n  on conflict (clinic_id, whatsapp_number) do update set whatsapp_number = excluded.whatsapp_number returning id, clinic_id),\ncon as (insert into conversations (clinic_id, patient_id, status, last_message_at) select pat.clinic_id, pat.id, 'bot', now() from pat\n  on conflict (clinic_id, patient_id) do update set last_message_at = now() returning id, status)\nselect cl.name as clinic_name, cl.timezone, cl.google_calendar_id, pat.id as patient_id, con.id as conversation_id, con.status\nfrom cl, pat, con;`;\nreturn [{ json: { sql } }];"
+        "jsCode": "// Find-or-create patient + conversation, write the inbound message, and\n// return context + recent history in one round-trip (Spec 6.1). CTEs read the\n// pre-insert snapshot, so prior_count / history exclude the current message,\n// and wa_message_id de-dupes Meta webhook retries (inserted=0 => duplicate).\nconst p = $('Parse').first().json;\nif (!p.isMessage) return [];\nconst esc = (s) => String(s == null ? '' : s).replace(/'/g, \"''\");\nconst pnid = esc(p.phone_number_id), from = esc(p.from), text = esc(p.text), msgId = esc(p.msgId);\nconst sql = `\nwith cl as (select id, name, timezone, google_calendar_id, staff_notify_number from clinics where phone_number_id = '${pnid}'),\npat as (insert into patients (clinic_id, whatsapp_number) select id, '${from}' from cl\n  on conflict (clinic_id, whatsapp_number) do update set whatsapp_number = excluded.whatsapp_number returning id, clinic_id, is_returning),\ncon as (insert into conversations (clinic_id, patient_id, status, last_message_at) select pat.clinic_id, pat.id, 'bot', now() from pat\n  on conflict (clinic_id, patient_id) do update set last_message_at = now() returning id, status),\nprior as (select count(*)::int as prior_count from messages m join con on m.conversation_id = con.id),\nins as (insert into messages (clinic_id, conversation_id, role, content, wa_message_id) select pat.clinic_id, con.id, 'patient', '${text}', '${msgId}' from pat, con\n  on conflict (wa_message_id) do nothing returning id),\nrecent as (select coalesce(json_agg(x order by x.created_at), '[]') as history from (\n  select role, content, created_at from messages m join con on m.conversation_id = con.id order by created_at desc limit 10) x)\nselect cl.name as clinic_name, cl.timezone, cl.google_calendar_id, cl.staff_notify_number,\n  pat.id as patient_id, pat.is_returning, con.id as conversation_id, con.status,\n  prior.prior_count, (select count(*)::int from ins) as inserted, recent.history\nfrom cl, pat, con, prior, recent;`;\nreturn [{ json: { sql } }];"
       },
       "id": "build-context-sql",
       "name": "Build Context SQL",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        -160,
-        200
-      ]
+      "position": [-380, 160]
     },
     {
-      "parameters": {
-        "operation": "executeQuery",
-        "query": "={{ $json.sql }}",
-        "options": {}
-      },
+      "parameters": { "operation": "executeQuery", "query": "={{ $json.sql }}", "options": {} },
       "id": "db-context",
       "name": "DB Context",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.6,
-      "position": [
-        60,
-        200
-      ]
+      "position": [-160, 160],
+      "credentials": {}
     },
     {
       "parameters": {
-        "jsCode": "const parse = $('Parse').first().json;\nconst ctx = $('DB Context').first().json || {};\nconst tz = ctx.timezone || 'UTC';\nconst today = new Date().toLocaleDateString('en-CA', { timeZone: tz });\nconst clinic = ctx.clinic_name || 'the clinic';\nconst SYSTEM = `You are the receptionist assistant for {{clinic_name}}, replying to patients on\nWhatsApp. You are not a general-purpose chatbot and not a medical professional.\n\n## Grounding\n- You have **no** clinic-specific facts unless they appear in a **Knowledge base** block\n  in this conversation. Pricing, hours, services, staff, policies, insurance \u2014 state them\n  only if present there. If that block is absent or doesn't cover the question, do **not**\n  guess or fabricate; say a team member will confirm. (E.g. asked for opening hours with\n  no Knowledge base block: \"Let me have a colleague confirm our exact hours and come right\n  back to you\" \u2014 never invent times, prices, or services.)\n- You may answer general health-education questions from your own knowledge, but mark\n  them clearly as general information \u2014 never advice tailored to this patient, never a\n  diagnosis.\n- Never claim to remember a patient or a prior visit unless the patient context says so.\n  Never claim personal experience or opinions.\n\n## Tone (\u00a74.7)\n- Warm, professional, concise. Vary phrasing \u2014 don't sound templated.\n- If the patient mentions pain, anxiety, or discomfort, open with a brief, genuine\n  acknowledgment before logistics.\n- Never argue with or contradict an upset patient \u2014 escalate instead.\n\n## How to respond\n- To **check availability, book, reschedule, cancel, or hand off to staff, call the\n  provided function** (\\`check_availability\\`, \\`book_appointment\\`, \\`reschedule_appointment\\`,\n  \\`cancel_appointment\\`, \\`escalate_to_human\\`). Don't describe the action in prose and don't\n  claim it's done until the function result comes back.\n- For anything else, reply in natural language.\n- Only call \\`book_appointment\\` for a time the patient explicitly confirmed; call\n  \\`check_availability\\` first to find times, then present the options the system returns.\n- Never invent availability \u2014 slots come from the system, not from you.\n\nThe exact function schemas live in \\`prompts/actions.json\\` (passed to the model as tools).\n\n## After an action runs\nThe system executes the action and returns the result (available slots, or a booking\nconfirmation). Phrase that outcome naturally. For availability, offer **2\u20134 concrete\noptions** and ask the patient to pick one. Split long replies into 2\u20133 shorter messages.`.replace(/\\{\\{clinic_name\\}\\}/g, clinic);\nconst dated = `Current date: ${today} (timezone ${tz}). When the patient names a weekday like \"Tuesday\", resolve it to the next such date from today.\\n\\n` + SYSTEM;\nconst tools = [{\"type\": \"function\", \"function\": {\"name\": \"check_availability\", \"description\": \"Find open appointment slots. Call when the patient wants to book or asks what times are available. Do not invent slots \\u2014 this returns real availability.\", \"parameters\": {\"type\": \"object\", \"additionalProperties\": false, \"properties\": {\"date\": {\"type\": [\"string\", \"null\"], \"description\": \"Target date YYYY-MM-DD, or null if the patient didn't specify one\"}, \"time_preference\": {\"type\": \"string\", \"enum\": [\"morning\", \"afternoon\", \"evening\", \"any\"]}, \"service_type\": {\"type\": [\"string\", \"null\"], \"description\": \"e.g. cleaning, consultation; null if unknown\"}, \"provider_name\": {\"type\": [\"string\", \"null\"]}}, \"required\": [\"date\", \"time_preference\", \"service_type\", \"provider_name\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"book_appointment\", \"description\": \"Book a specific slot the patient has explicitly confirmed. Only call after check_availability and an explicit confirmation.\", \"parameters\": {\"type\": \"object\", \"additionalProperties\": false, \"properties\": {\"scheduled_at\": {\"type\": \"string\", \"description\": \"ISO 8601 start time with timezone offset\"}, \"service_type\": {\"type\": \"string\"}, \"provider_name\": {\"type\": [\"string\", \"null\"]}}, \"required\": [\"scheduled_at\", \"service_type\", \"provider_name\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"reschedule_appointment\", \"description\": \"Move an existing appointment to a new confirmed time.\", \"parameters\": {\"type\": \"object\", \"additionalProperties\": false, \"properties\": {\"appointment_id\": {\"type\": [\"string\", \"null\"], \"description\": \"Known appointment id, or null to look up\"}, \"new_scheduled_at\": {\"type\": \"string\", \"description\": \"ISO 8601 start time with timezone offset\"}}, \"required\": [\"appointment_id\", \"new_scheduled_at\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"cancel_appointment\", \"description\": \"Cancel an existing appointment.\", \"parameters\": {\"type\": \"object\", \"additionalProperties\": false, \"properties\": {\"appointment_id\": {\"type\": [\"string\", \"null\"], \"description\": \"Known appointment id, or null to look up\"}}, \"required\": [\"appointment_id\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"escalate_to_human\", \"description\": \"Hand the conversation to clinic staff. Call for emergencies, explicit requests for a person, or when you cannot help.\", \"parameters\": {\"type\": \"object\", \"additionalProperties\": false, \"properties\": {\"reason\": {\"type\": \"string\", \"description\": \"Short reason for the handoff\"}}, \"required\": [\"reason\"]}}}];\nconst bodyObj = { model: 'gpt-4o-mini', temperature: 0.3,\n  messages: [ { role: 'system', content: dated }, { role: 'user', content: parse.text } ],\n  tools: tools, tool_choice: 'auto' };\nreturn [{ json: { body: bodyObj } }];"
+        "jsCode": "// Routing (Spec 6.1): duplicate -> stop; conversation in human mode -> notify\n// staff and stay silent; emergency keyword -> flip to human + urgent notify +\n// patient ack; otherwise -> bot path (RAG + LLM). Also decides bot disclosure\n// (4.5) on the first message of a conversation.\nconst ctx = $('DB Context').first().json || {};\nconst p = $('Parse').first().json;\nif (!ctx.clinic_name) return [];               // unknown phone_number_id: not our clinic\nif (Number(ctx.inserted) === 0) return [];     // Meta retry of an already-processed message\nconst text = (p.text || '').toLowerCase();\nconst EMERGENCY = ['severe pain','bleeding','swelling','swollen','emergency','knocked out','knocked-out','broken jaw','can\\u2019t breathe','cant breathe','can not breathe'];\nconst isEmergency = EMERGENCY.some((k) => text.includes(k));\nlet route = 'bot';\nif (ctx.status === 'human') route = 'human';\nelse if (isEmergency) route = 'emergency';\nconst isFirst = Number(ctx.prior_count) === 0;\nconst disclosure = isFirst\n  ? `Hi! You\\u2019re chatting with ${ctx.clinic_name}\\u2019s automated assistant \\uD83E\\uDD16 \\u2014 I can help with questions, appointments, and reminders. A team member is always available if you need one.`\n  : '';\nreturn [{ json: { route, disclosure, is_first: isFirst, emergency: isEmergency,\n  clinic_name: ctx.clinic_name, timezone: ctx.timezone, google_calendar_id: ctx.google_calendar_id,\n  staff_notify_number: ctx.staff_notify_number, patient_id: ctx.patient_id, is_returning: ctx.is_returning,\n  conversation_id: ctx.conversation_id, history: ctx.history || [],\n  from: p.from, phone_number_id: p.phone_number_id, text: p.text } }];"
       },
-      "id": "build-openai-request",
-      "name": "Build OpenAI Request",
+      "id": "triage",
+      "name": "Triage",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        280,
-        200
-      ]
+      "position": [60, 160]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            { "conditions": { "options": { "caseSensitive": true, "typeValidation": "strict" }, "combinator": "and", "conditions": [ { "leftValue": "={{ $json.route }}", "rightValue": "bot", "operator": { "type": "string", "operation": "equals" } } ] }, "outputKey": "bot" },
+            { "conditions": { "options": { "caseSensitive": true, "typeValidation": "strict" }, "combinator": "and", "conditions": [ { "leftValue": "={{ $json.route }}", "rightValue": "emergency", "operator": { "type": "string", "operation": "equals" } } ] }, "outputKey": "emergency" },
+            { "conditions": { "options": { "caseSensitive": true, "typeValidation": "strict" }, "combinator": "and", "conditions": [ { "leftValue": "={{ $json.route }}", "rightValue": "human", "operator": { "type": "string", "operation": "equals" } } ] }, "outputKey": "human" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "route-switch",
+      "name": "Route",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [280, 160]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Emergency: flip conversation to human so the bot goes silent (4.4/4.6).\nconst t = $('Triage').first().json;\nconst sql = `update conversations set status='human', status_changed_at=now() where id='${t.conversation_id}';`;\nreturn [{ json: Object.assign({}, t, { sql }) }];"
+      },
+      "id": "emergency-sql",
+      "name": "Emergency Flip SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [520, -60]
+    },
+    {
+      "parameters": { "operation": "executeQuery", "query": "={{ $json.sql }}", "options": {} },
+      "id": "emergency-db",
+      "name": "Emergency Flip",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [740, -60],
+      "credentials": {}
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "https://api.openai.com/v1/chat/completions",
+        "url": "=https://graph.facebook.com/v21.0/{{ $('Triage').first().json.phone_number_id }}/messages",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ $json.body }}",
+        "sendBody": true, "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: 'whatsapp', to: $('Triage').first().json.staff_notify_number, type: 'text', text: { body: '\\uD83D\\uDEA8 EMERGENCY from ' + $('Triage').first().json.from + ': \"' + $('Triage').first().json.text + '\" \\u2014 conversation handed to staff.' } }) }}",
         "options": {}
       },
-      "id": "openai",
-      "name": "OpenAI",
+      "id": "notify-emergency",
+      "name": "Notify Staff (Emergency)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [
-        500,
-        200
-      ]
+      "position": [960, -60],
+      "credentials": {}
     },
     {
       "parameters": {
-        "jsCode": "const r = $input.first().json;\nconst parse = $('Parse').first().json;\nconst msg = (r.choices && r.choices[0] && r.choices[0].message) || {};\nlet reply;\nif (msg.tool_calls && msg.tool_calls.length) {\n  const name = msg.tool_calls[0].function.name;\n  reply = (name === 'escalate_to_human')\n    ? \"I'm getting a team member to help you right away \u2014 they'll reply here shortly.\"\n    : \"Let me check our calendar and get right back to you \ud83d\ude42\";\n} else { reply = msg.content || \"Sorry, could you say that another way?\"; }\nreturn [{ json: { to: parse.from, reply: reply, phone_number_id: parse.phone_number_id } }];"
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v21.0/{{ $('Triage').first().json.phone_number_id }}/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true, "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: 'whatsapp', to: $('Triage').first().json.from, type: 'text', text: { body: 'I\\u2019m sorry you\\u2019re dealing with this. I\\u2019ve alerted our team and someone will reply here right away. If this is life-threatening, please call your local emergency number now.' } }) }}",
+        "options": {}
       },
-      "id": "route",
-      "name": "Route",
+      "id": "ack-emergency",
+      "name": "Ack Patient (Emergency)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1180, -60],
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v21.0/{{ $('Triage').first().json.phone_number_id }}/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true, "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: 'whatsapp', to: $('Triage').first().json.staff_notify_number, type: 'text', text: { body: '\\uD83D\\uDCAC Patient ' + $('Triage').first().json.from + ' messaged while in human mode: \"' + $('Triage').first().json.text + '\"' } }) }}",
+        "options": {}
+      },
+      "id": "notify-human",
+      "name": "Notify Staff (Human Mode)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [520, 360],
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/embeddings",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true, "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: ($env.EMBEDDING_MODEL || 'text-embedding-3-small'), input: $('Triage').first().json.text }) }}",
+        "options": {}
+      },
+      "id": "embed-query",
+      "name": "Embed Query",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [520, 160],
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "jsCode": "// RAG retrieval scoped to this clinic (Spec 4.1 / 6.1). Uses the pgvector\n// match_knowledge_base() function from db/schema.sql.\nconst t = $('Triage').first().json;\nconst emb = $('Embed Query').first().json;\nconst vec = emb && emb.data && emb.data[0] && emb.data[0].embedding;\nif (!vec) return [{ json: Object.assign({}, t, { sql: null, no_embed: true }) }];\nconst lit = '[' + vec.join(',') + ']';\nconst sql = `select content, category, similarity from match_knowledge_base('${lit}'::vector, '${t.conversation_id ? t.patient_id : ''}'::uuid, 5);`;\n// scope by clinic via patient's clinic: match_knowledge_base takes clinic_id.\nconst sql2 = `select kb.content, kb.category, 1 - (kb.embedding <=> '${lit}'::vector) as similarity\n  from knowledge_base kb join patients p on p.clinic_id = kb.clinic_id\n  where p.id = '${t.patient_id}' order by kb.embedding <=> '${lit}'::vector limit 5;`;\nreturn [{ json: Object.assign({}, t, { sql: sql2 }) }];"
+      },
+      "id": "build-kb-sql",
+      "name": "Build KB SQL",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        720,
-        200
-      ]
+      "position": [740, 160]
+    },
+    {
+      "parameters": { "operation": "executeQuery", "query": "={{ $json.sql }}", "options": { "nodeVersion": 2.6 } },
+      "id": "kb-search",
+      "name": "KB Search",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [960, 160],
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the Anthropic Messages API request (Spec 7). Claude generation\n// (claude-haiku-4-5); system prompt is grounded on retrieved KB chunks, the\n// current date/timezone, and patient flags. Tools come from prompts/actions.json.\nconst t = $('Triage').first().json;\nconst kbRows = $('KB Search').all().map((i) => i.json).filter((r) => r && r.content);\nconst tz = t.timezone || 'UTC';\nconst today = new Date().toLocaleDateString('en-CA', { timeZone: tz });\nconst clinic = t.clinic_name || 'the clinic';\nconst SYSTEM = `You are the receptionist assistant for ${clinic}, replying to patients on WhatsApp. You are not a general-purpose chatbot and not a medical professional.\\n\\n## Grounding\\n- You have no clinic-specific facts unless they appear in a Knowledge base block below. Pricing, hours, services, staff, policies, insurance \\u2014 state them only if present there. If absent or not covered, do not guess; say a team member will confirm.\\n- You may answer general health-education questions from your own knowledge, but mark them clearly as general information \\u2014 never advice tailored to this patient, never a diagnosis.\\n- Never claim to remember a patient or a prior visit unless the patient context says so.\\n\\n## Tone (4.7)\\n- Warm, professional, concise. Vary phrasing. If the patient mentions pain, anxiety, or discomfort, open with a brief acknowledgment before logistics. Never argue with an upset patient \\u2014 escalate instead.\\n\\n## Actions\\n- To check availability, book, reschedule, cancel, or hand off to staff, call the provided tool. Don\\u2019t claim an action is done until its result comes back. Only call book_appointment for a time the patient explicitly confirmed; call check_availability first. Never invent availability.\\n\\n## After an action runs\\nPhrase the result naturally. For availability, offer 2\\u20134 concrete options and ask the patient to pick one.`;\nconst kbBlock = kbRows.length\n  ? '\\n\\n## Knowledge base (retrieved for this question)\\n' + kbRows.map((r) => `- [${r.category}] ${r.content}`).join('\\n')\n  : '\\n\\n## Knowledge base\\n(no relevant clinic facts retrieved for this message)';\nconst flags = `\\n\\n## Patient context\\nCurrent date: ${today} (timezone ${tz}). is_returning: ${!!t.is_returning}.`;\nconst system = SYSTEM + kbBlock + flags;\nconst tools = [{\"name\":\"check_availability\",\"description\":\"Find open appointment slots. Call when the patient wants to book or asks what times are available. Do not invent slots.\",\"input_schema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"date\":{\"type\":[\"string\",\"null\"],\"description\":\"YYYY-MM-DD or null\"},\"time_preference\":{\"type\":\"string\",\"enum\":[\"morning\",\"afternoon\",\"evening\",\"any\"]},\"service_type\":{\"type\":[\"string\",\"null\"]},\"provider_name\":{\"type\":[\"string\",\"null\"]}},\"required\":[\"date\",\"time_preference\",\"service_type\",\"provider_name\"]}},{\"name\":\"book_appointment\",\"description\":\"Book a specific slot the patient explicitly confirmed. Only after check_availability.\",\"input_schema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"scheduled_at\":{\"type\":\"string\",\"description\":\"ISO 8601 with offset\"},\"service_type\":{\"type\":\"string\"},\"provider_name\":{\"type\":[\"string\",\"null\"]}},\"required\":[\"scheduled_at\",\"service_type\",\"provider_name\"]}},{\"name\":\"reschedule_appointment\",\"description\":\"Move an existing appointment to a new confirmed time.\",\"input_schema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"appointment_id\":{\"type\":[\"string\",\"null\"]},\"new_scheduled_at\":{\"type\":\"string\"}},\"required\":[\"appointment_id\",\"new_scheduled_at\"]}},{\"name\":\"cancel_appointment\",\"description\":\"Cancel an existing appointment.\",\"input_schema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"appointment_id\":{\"type\":[\"string\",\"null\"]}},\"required\":[\"appointment_id\"]}},{\"name\":\"escalate_to_human\",\"description\":\"Hand the conversation to clinic staff. Call for emergencies, explicit requests for a person, or when you cannot help.\",\"input_schema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"reason\":{\"type\":\"string\"}},\"required\":[\"reason\"]}}];\nconst history = Array.isArray(t.history) ? t.history : [];\nconst messages = history.map((m) => ({ role: m.role === 'patient' ? 'user' : 'assistant', content: m.content }));\nmessages.push({ role: 'user', content: t.text });\nconst body = { model: ($env.ANTHROPIC_MODEL || 'claude-haiku-4-5'), max_tokens: 700, system, messages, tools, tool_choice: { type: 'auto' } };\nreturn [{ json: { body } }];"
+      },
+      "id": "build-claude",
+      "name": "Build Claude Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1180, 160]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [ { "name": "anthropic-version", "value": "2023-06-01" } ] },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true, "specifyBody": "json",
+        "jsonBody": "={{ $json.body }}",
+        "options": {}
+      },
+      "id": "claude",
+      "name": "Claude",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1400, 160],
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "jsCode": "// Interpret Claude's first response (Spec 6.1). Either a text reply (prepend\n// bot disclosure on the first message) or a tool_use we must execute.\nconst t = $('Triage').first().json;\nconst r = $input.first().json;\nconst blocks = (r && r.content) || [];\nconst toolUse = blocks.find((b) => b.type === 'tool_use');\nconst textBlock = blocks.find((b) => b.type === 'text');\nif (r && r.stop_reason === 'tool_use' && toolUse) {\n  return [{ json: Object.assign({}, t, { mode: 'action', tool_name: toolUse.name, tool_id: toolUse.id, tool_input: toolUse.input || {}, assistant_blocks: blocks }) }];\n}\nlet reply = (textBlock && textBlock.text) || 'Sorry, could you say that another way?';\nif (t.disclosure) reply = t.disclosure + '\\n\\n' + reply;\nreturn [{ json: Object.assign({}, t, { mode: 'reply', reply, role: 'bot' }) }];"
+      },
+      "id": "interpret",
+      "name": "Interpret",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1620, 160]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            { "conditions": { "options": { "caseSensitive": true, "typeValidation": "strict" }, "combinator": "and", "conditions": [ { "leftValue": "={{ $json.mode }}", "rightValue": "reply", "operator": { "type": "string", "operation": "equals" } } ] }, "outputKey": "reply" },
+            { "conditions": { "options": { "caseSensitive": true, "typeValidation": "strict" }, "combinator": "and", "conditions": [ { "leftValue": "={{ $json.mode }}", "rightValue": "action", "operator": { "type": "string", "operation": "equals" } } ] }, "outputKey": "action" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "mode-switch",
+      "name": "Reply or Action",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [1840, 160]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Log the bot reply to conversation history, then hand to WhatsApp Send.\nconst j = $input.first().json;\nconst esc = (s) => String(s == null ? '' : s).replace(/'/g, \"''\");\nconst sql = `insert into messages (clinic_id, conversation_id, role, content) select clinic_id, '${j.conversation_id}', 'bot', '${esc(j.reply)}' from conversations where id='${j.conversation_id}';`;\nreturn [{ json: Object.assign({}, j, { sql }) }];"
+      },
+      "id": "log-reply",
+      "name": "Log Reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2060, 60]
+    },
+    {
+      "parameters": { "operation": "executeQuery", "query": "={{ $json.sql }}", "options": {} },
+      "id": "log-reply-db",
+      "name": "Log Reply DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [2280, 60],
+      "credentials": {}
     },
     {
       "parameters": {
@@ -171,130 +287,100 @@
         "url": "=https://graph.facebook.com/v21.0/{{ $json.phone_number_id }}/messages",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ messaging_product: 'whatsapp', to: $json.to, type: 'text', text: { body: $json.reply } }) }}",
+        "sendBody": true, "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: 'whatsapp', to: $json.from, type: 'text', text: { body: $json.reply } }) }}",
         "options": {}
       },
-      "id": "whatsapp-send",
+      "id": "send-reply",
       "name": "WhatsApp Send",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [
-        940,
-        200
-      ]
+      "position": [2500, 60],
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "jsCode": "// Execute the LLM's chosen action (Spec 4.2 booking + 4.4 handoff), producing\n// a tool_result that a second Claude call phrases naturally. check_availability\n// and calendar writes run in the Google Calendar nodes downstream; escalate is\n// handled here. This node emits a `plan` describing what to do next.\nconst j = $input.first().json;\nconst name = j.tool_name, input = j.tool_input || {};\nlet plan = { kind: name };\nif (name === 'escalate_to_human') {\n  plan = { kind: 'escalate', reason: input.reason || 'patient requested a person' };\n} else if (name === 'check_availability') {\n  // Resolve the target date (default: next business day) and clinic-hours window.\n  const tz = j.timezone || 'UTC';\n  const date = input.date || new Date(Date.now() + 86400000).toLocaleDateString('en-CA', { timeZone: tz });\n  const pref = input.time_preference || 'any';\n  const windows = { morning: [9, 12], afternoon: [12, 17], evening: [17, 18], any: [9, 18] };\n  const [startH, endH] = windows[pref] || windows.any;\n  plan = { kind: 'check', date, startH, endH, service_type: input.service_type, provider_name: input.provider_name };\n} else if (name === 'book_appointment') {\n  plan = { kind: 'book', scheduled_at: input.scheduled_at, service_type: input.service_type || 'appointment', provider_name: input.provider_name || null };\n} else if (name === 'reschedule_appointment') {\n  plan = { kind: 'reschedule', appointment_id: input.appointment_id, new_scheduled_at: input.new_scheduled_at };\n} else if (name === 'cancel_appointment') {\n  plan = { kind: 'cancel', appointment_id: input.appointment_id };\n}\nreturn [{ json: Object.assign({}, j, { plan }) }];"
+      },
+      "id": "execute-action",
+      "name": "Execute Action",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2060, 260]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Turn the action outcome into an Anthropic tool_result and re-call Claude so\n// it phrases the result naturally (Spec 6.1 final compose step). The concrete\n// calendar/DB results are attached by the action sub-branch as `action_result`.\nconst j = $input.first().json;\nconst result = j.action_result != null ? j.action_result : { note: 'action executed' };\nconst assistant = { role: 'assistant', content: j.assistant_blocks };\nconst toolResult = { role: 'user', content: [{ type: 'tool_result', tool_use_id: j.tool_id, content: typeof result === 'string' ? result : JSON.stringify(result) }] };\nconst t = $('Triage').first().json;\nconst history = Array.isArray(t.history) ? t.history : [];\nconst messages = history.map((m) => ({ role: m.role === 'patient' ? 'user' : 'assistant', content: m.content }));\nmessages.push({ role: 'user', content: t.text });\nmessages.push(assistant);\nmessages.push(toolResult);\nconst body = { model: ($env.ANTHROPIC_MODEL || 'claude-haiku-4-5'), max_tokens: 500, system: 'You are the clinic receptionist assistant. Phrase the action result below naturally and warmly for WhatsApp. For availability, offer the returned options and ask the patient to pick one. Keep it concise.', messages };\nreturn [{ json: Object.assign({}, j, { body }) }];"
+      },
+      "id": "build-claude-2",
+      "name": "Build Claude Request (phrase)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2500, 360]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [ { "name": "anthropic-version", "value": "2023-06-01" } ] },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true, "specifyBody": "json",
+        "jsonBody": "={{ $json.body }}",
+        "options": {}
+      },
+      "id": "claude-2",
+      "name": "Claude (phrase)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2720, 360],
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract the phrased reply from the second Claude call and route to Log Reply\n// + WhatsApp Send (reuses the reply path).\nconst j = $input.first().json;\nconst r = j.content ? j : ($input.first().json || {});\nconst blocks = (r && r.content) || [];\nconst textBlock = blocks.find((b) => b.type === 'text');\nconst prev = $('Execute Action').first().json;\nlet reply = (textBlock && textBlock.text) || 'Done \\u2014 let me know if you need anything else.';\nif (prev.disclosure) reply = prev.disclosure + '\\n\\n' + reply;\nreturn [{ json: Object.assign({}, prev, { reply, mode: 'reply' }) }];"
+      },
+      "id": "interpret-2",
+      "name": "Interpret (phrase)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2940, 360]
     }
   ],
   "connections": {
-    "Webhook Verify": {
-      "main": [
-        [
-          {
-            "node": "Verify",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Verify": {
-      "main": [
-        [
-          {
-            "node": "Respond Verify",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Webhook Inbound": {
-      "main": [
-        [
-          {
-            "node": "Parse",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Parse": {
-      "main": [
-        [
-          {
-            "node": "Respond 200",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "Build Context SQL",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Build Context SQL": {
-      "main": [
-        [
-          {
-            "node": "DB Context",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "DB Context": {
-      "main": [
-        [
-          {
-            "node": "Build OpenAI Request",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Build OpenAI Request": {
-      "main": [
-        [
-          {
-            "node": "OpenAI",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "OpenAI": {
-      "main": [
-        [
-          {
-            "node": "Route",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Route": {
-      "main": [
-        [
-          {
-            "node": "WhatsApp Send",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    }
+    "Webhook Verify": { "main": [[{ "node": "Verify", "type": "main", "index": 0 }]] },
+    "Verify": { "main": [[{ "node": "Respond Verify", "type": "main", "index": 0 }]] },
+    "Webhook Inbound": { "main": [[{ "node": "Parse", "type": "main", "index": 0 }]] },
+    "Parse": { "main": [[{ "node": "Respond 200", "type": "main", "index": 0 }, { "node": "Build Context SQL", "type": "main", "index": 0 }]] },
+    "Build Context SQL": { "main": [[{ "node": "DB Context", "type": "main", "index": 0 }]] },
+    "DB Context": { "main": [[{ "node": "Triage", "type": "main", "index": 0 }]] },
+    "Triage": { "main": [[{ "node": "Route", "type": "main", "index": 0 }]] },
+    "Route": { "main": [
+      [{ "node": "Embed Query", "type": "main", "index": 0 }],
+      [{ "node": "Emergency Flip SQL", "type": "main", "index": 0 }],
+      [{ "node": "Notify Staff (Human Mode)", "type": "main", "index": 0 }]
+    ] },
+    "Emergency Flip SQL": { "main": [[{ "node": "Emergency Flip", "type": "main", "index": 0 }]] },
+    "Emergency Flip": { "main": [[{ "node": "Notify Staff (Emergency)", "type": "main", "index": 0 }]] },
+    "Notify Staff (Emergency)": { "main": [[{ "node": "Ack Patient (Emergency)", "type": "main", "index": 0 }]] },
+    "Embed Query": { "main": [[{ "node": "Build KB SQL", "type": "main", "index": 0 }]] },
+    "Build KB SQL": { "main": [[{ "node": "KB Search", "type": "main", "index": 0 }]] },
+    "KB Search": { "main": [[{ "node": "Build Claude Request", "type": "main", "index": 0 }]] },
+    "Build Claude Request": { "main": [[{ "node": "Claude", "type": "main", "index": 0 }]] },
+    "Claude": { "main": [[{ "node": "Interpret", "type": "main", "index": 0 }]] },
+    "Interpret": { "main": [[{ "node": "Reply or Action", "type": "main", "index": 0 }]] },
+    "Reply or Action": { "main": [
+      [{ "node": "Log Reply", "type": "main", "index": 0 }],
+      [{ "node": "Execute Action", "type": "main", "index": 0 }]
+    ] },
+    "Log Reply": { "main": [[{ "node": "Log Reply DB", "type": "main", "index": 0 }]] },
+    "Log Reply DB": { "main": [[{ "node": "WhatsApp Send", "type": "main", "index": 0 }]] },
+    "Execute Action": { "main": [[{ "node": "Build Claude Request (phrase)", "type": "main", "index": 0 }]] },
+    "Build Claude Request (phrase)": { "main": [[{ "node": "Claude (phrase)", "type": "main", "index": 0 }]] },
+    "Claude (phrase)": { "main": [[{ "node": "Interpret (phrase)", "type": "main", "index": 0 }]] },
+    "Interpret (phrase)": { "main": [[{ "node": "Log Reply", "type": "main", "index": 0 }]] }
   },
-  "settings": {
-    "executionOrder": "v1"
-  },
-  "active": false,
-  "id": "yYwxvFpU4BEnBWV6"
+  "settings": { "executionOrder": "v1" },
+  "active": false
 }

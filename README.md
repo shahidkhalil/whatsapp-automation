@@ -5,12 +5,25 @@ Stack: WhatsApp Cloud API · n8n · Claude/GPT · Postgres + pgvector · Google 
 
 ## Build progress (MVP — Spec §4)
 - [x] Database schema (§5) — `db/schema.sql`, live in the `db` container
-- [ ] Booking + Google Calendar (§4.2) — highest risk, built first
-- [ ] FAQ / RAG retrieval (§4.1)
-- [ ] Automated reminders (§4.3)
-- [ ] Human handoff (§4.4)
-- [ ] Bot disclosure (§4.5)
-- [ ] Emergency keyword detection (§4.6)
+- [x] FAQ / RAG retrieval (§4.1) — `knowledge_base` + `match_knowledge_base()`, wired into Workflow A; loader in `scripts/load-knowledge-base.mjs`
+- [x] Booking + Google Calendar (§4.2) — `check_availability` / `book` / `reschedule` / `cancel` tool dispatch in Workflow A *(logic + SQL verified; end-to-end run in n8n pending — see Verification status)*
+- [x] Automated reminders (§4.3) — `n8n/workflow-b-reminders.json` + template `whatsapp/templates/appointment_reminder.json`
+- [x] Human handoff (§4.4) — status → `human`, staff notification, bot stays silent
+- [x] Bot disclosure (§4.5) — first-message disclosure in Workflow A's Triage node
+- [x] Emergency keyword detection (§4.6) — keyword match → flip to `human` → urgent staff alert + patient ack
+
+### Verification status
+The **database layer is verified against a real Postgres 16 + pgvector**: run
+`npm test`. `scripts/test/validate.mjs` checks every JSON file, compiles each n8n
+Code-node, and validates the tool schemas; `scripts/test/sql.mjs` exercises the
+find-or-create + message-dedupe + RAG match + reminder-sweep SQL live. The n8n
+workflows themselves are **not yet run end-to-end** — that needs the n8n
+container (see *Local dev stack*) plus the API credentials in §Credentials.
+
+**LLM:** Claude `claude-haiku-4-5` for generation via the Anthropic Messages API,
+OpenAI `text-embedding-3-small` for RAG embeddings (matches `vector(1536)`).
+Both keys/models live in `.env` (`ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL`,
+`OPENAI_API_KEY`/`EMBEDDING_MODEL`) and are set in the n8n Credentials UI.
 
 ## Local dev stack (Docker)
 ```bash
@@ -28,10 +41,27 @@ docker compose up -d n8n db adminer
 credentials at a Supabase cloud connection string — n8n's Postgres node is unchanged.
 
 ## Working assumptions (Spec §12 open questions)
-- **LLM:** OpenAI `gpt-4o-mini` (chat) + `text-embedding-3-small` embeddings (1536-dim) —
-  one key covers both. Models are set in `.env` (`OPENAI_MODEL`, `EMBEDDING_MODEL`) and
-  swappable there. The schema's `vector(1536)` already matches the embedding model.
+- **LLM:** Claude `claude-haiku-4-5` for generation (Anthropic Messages API) +
+  OpenAI `text-embedding-3-small` embeddings (1536-dim). Anthropic has no
+  embeddings endpoint, so OpenAI covers RAG vectors only. Models are set in
+  `.env` (`ANTHROPIC_MODEL`, `EMBEDDING_MODEL`) and swappable there; the schema's
+  `vector(1536)` already matches the embedding model.
 - **One calendar / provider per clinic** for the MVP.
+
+## Repo layout
+| Path | What |
+|------|------|
+| `db/` | `schema.sql` (§5) and `seed.sql` (one test clinic) |
+| `n8n/workflow-a-inbound.json` | Inbound message handling (§6.1): webhook → RAG → Claude tool-calling → booking/handoff/reply |
+| `n8n/workflow-b-reminders.json` | Hourly reminder sweep (§6.2/§4.3) |
+| `prompts/` | `system-prompt.md` (§7), `actions.json` (Claude tool schemas), `knowledge-base.sample.md` (KB seed data) |
+| `whatsapp/templates/` | Pre-approval message templates for business-initiated reminders (§8) |
+| `scripts/load-knowledge-base.mjs` | Embeds KB chunks → `knowledge_base` (§4.1/§10) |
+| `scripts/test/` | `validate.mjs` (offline) + `sql.mjs` (live DB). `npm test` runs both. |
+
+Import the two workflow JSONs into n8n (Workflows → Import from file), attach the
+Postgres / Anthropic / OpenAI / WhatsApp / Google Calendar credentials, then
+activate them.
 
 ## Credentials
 Setup steps for the LLM key, Google Calendar OAuth, and WhatsApp Cloud API are in
