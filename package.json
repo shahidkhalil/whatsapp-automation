@@ -5,10 +5,12 @@
   "type": "module",
   "description": "WhatsApp clinic receptionist bot — n8n workflows, DB schema, and support scripts (Spec MVP).",
   "scripts": {
-    "test": "node scripts/test/validate.mjs && node scripts/test/sql.mjs",
+    "test": "node scripts/test/validate.mjs && node scripts/test/sql.mjs && node scripts/test/appointments.mjs",
     "test:offline": "node scripts/test/validate.mjs",
     "test:sql": "node scripts/test/sql.mjs",
+    "test:appts": "node scripts/test/appointments.mjs",
     "load-kb": "node scripts/load-knowledge-base.mjs",
+    "seed-appts": "node -e \"import('pg').then(async({default:pg})=>{const fs=await import('node:fs/promises');const c=new pg.Client({connectionString:process.env.DATABASE_URL||'postgres://postgres:'+(process.env.POSTGRES_PASSWORD||'devpassword')+'@localhost:5433/'+(process.env.POSTGRES_DB||'clinic')});await c.connect();await c.query(await fs.readFile('db/seed-appointments.sql','utf8'));await c.end();console.log('seeded demo appointments')})\"",
     "webchat": "node scripts/webchat/server.mjs"
   },
   "dependencies": {

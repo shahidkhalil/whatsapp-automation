@@ -92,6 +92,10 @@ Quick messages to try: *"What are your opening hours?"* (RAG), *"Can I book
 Tuesday afternoon?"* (booking tool), *"I have severe pain and swelling"*
 (emergency), *"Can I speak to a person?"* (handoff).
 
+Seed demo appointments (for reschedule/cancel + reminders) with `npm run
+seed-appts`. Full step-by-step for every feature and level is in
+[docs/testing.md](docs/testing.md).
+
 ## Credentials
 Setup steps for the LLM key, Google Calendar OAuth, and WhatsApp Cloud API are in
 [docs/credentials-setup.md](docs/credentials-setup.md).
