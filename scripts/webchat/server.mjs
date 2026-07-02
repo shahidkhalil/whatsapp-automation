@@ -37,10 +37,12 @@ const OPENAI_KEY = process.env.OPENAI_API_KEY || '';
 const MODEL = process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5';
 const OPENAI_CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || 'gpt-4o-mini';
 const EMBED_MODEL = process.env.EMBEDDING_MODEL || 'text-embedding-3-small';
-// Generation provider: LLM_PROVIDER=anthropic|openai, else auto (Claude if its
-// key is set, otherwise ChatGPT). Embeddings always use OpenAI.
-const PROVIDER = (process.env.LLM_PROVIDER
-  || (ANTHROPIC_KEY ? 'anthropic' : (OPENAI_KEY ? 'openai' : 'none'))).toLowerCase();
+// Generation provider: LLM_PROVIDER=anthropic|openai, else 'auto'/unset picks
+// Claude if its key is set, otherwise ChatGPT. Embeddings always use OpenAI.
+const RAW_PROVIDER = (process.env.LLM_PROVIDER || 'auto').toLowerCase();
+const PROVIDER = RAW_PROVIDER === 'auto'
+  ? (ANTHROPIC_KEY ? 'anthropic' : (OPENAI_KEY ? 'openai' : 'none'))
+  : RAW_PROVIDER;
 const HAS_LLM = Boolean((PROVIDER === 'anthropic' && ANTHROPIC_KEY) || (PROVIDER === 'openai' && OPENAI_KEY));
 const GEN_LABEL = PROVIDER === 'anthropic' ? MODEL : PROVIDER === 'openai' ? OPENAI_CHAT_MODEL : 'none';
 const CLINIC_PHONE_ID = process.env.TEST_CLINIC_PHONE_ID || '1114486611757569'; // db/seed.sql
