@@ -118,7 +118,23 @@ function buildSystem(ctx, kbRows) {
 - To check availability, book, reschedule, cancel, or hand off to staff, call the provided tool. Don't claim an action is done until its result comes back. Only call book_appointment for a time the patient explicitly confirmed; call check_availability first.
 
 ## After an action runs
-Phrase the result naturally. For availability, offer 2–4 concrete options and ask the patient to pick one.${kbBlock}
+- Availability: write ONE short intro line only (e.g. "Here are the next available times:") — slot buttons are shown automatically, do NOT list times yourself.
+- Booking: use exactly this format:
+  ✅ Booked! [service] — [day date], [time][, with [provider] if known].
+  We'll remind you the day before. Need to change it? Just message me.
+
+## Conversation rule — always end with one next step
+Every reply must close with exactly ONE offer, question, or call to action. Never a dead end.
+- Price / hours / services → bridge to booking: "Want me to check available times?"
+- Any info answer → offer the most helpful next action
+- Don't know → "Want me to get a team member to answer this?"
+Never include more than one closing question.
+
+## Keep it short
+2–3 lines max per message. One idea per bubble.
+
+## Language
+Reply in the same language the patient uses. Urdu → Urdu. Roman Urdu → Roman Urdu. English → English.${kbBlock}
 
 ## Patient context
 Current date: ${today} (timezone ${tz}). is_returning: ${!!ctx.is_returning}.`;
@@ -180,6 +196,14 @@ async function llmPhrase(prev, toolResult) {
   return r.choices[0].message.content || 'Done — anything else?';
 }
 
+// Format a slot timestamp into a short button-friendly label (≤20 chars for WhatsApp buttons).
+function formatSlotLabel(scheduledAt, tz) {
+  const d = new Date(scheduledAt);
+  const day = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: tz || 'UTC' });
+  const time = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: tz || 'UTC' });
+  return `${day}, ${time}`.substring(0, 20);
+}
+
 // Simulated Google Calendar availability: clinic-hours slots on the target date.
 function simSlots(ctx, input) {
   const tz = ctx.timezone || 'UTC';
@@ -188,7 +212,8 @@ function simSlots(ctx, input) {
   const [a, b] = windows[input.time_preference] || windows.any;
   const slots = [];
   for (let h = a; h <= b && slots.length < 3; h++) {
-    slots.push({ scheduled_at: `${date}T${String(h).padStart(2, '0')}:00:00`, label: `${date} ${h}:00` });
+    const scheduledAt = `${date}T${String(h).padStart(2, '0')}:00:00`;
+    slots.push({ scheduled_at: scheduledAt, label: formatSlotLabel(scheduledAt, tz) });
   }
   return { date, slots, note: 'SIMULATED availability (no real Google Calendar in the test harness)' };
 }
@@ -279,19 +304,38 @@ async function handleMessage(from, text) {
     debug.tool = { name: first.name, input: first.input };
     const result = await runAction(ctx, { name: first.name, input: first.input });
     debug.action_result = result;
+
     if (first.name === 'escalate_to_human') {
       const reply = "I'm connecting you with a team member now — they'll reply here shortly.";
       await logBot(reply);
       return { reply: (disclosure ? disclosure + '\n\n' : '') + reply, debug };
     }
-    const reply = (await llmPhrase(first, result)) || 'Done — anything else?';
+
+    // Availability check: return slot buttons instead of prose
+    if (first.name === 'check_availability' && result.slots && result.slots.length) {
+      const intro = 'Here are the next available times — tap to pick one:';
+      const buttons = result.slots.slice(0, 3).map((s) => s.label);
+      const fullReply = disclosure ? disclosure + '\n\n' + intro : intro;
+      await logBot(fullReply);
+      return { reply: fullReply, buttons, debug };
+    }
+
+    const phrase = (await llmPhrase(first, result)) || 'Done — anything else?';
+    // Booking confirmation: add a confirm/change button pair
+    const buttons = first.name === 'book_appointment' && result.booked
+      ? ['🔄 Reschedule', '❌ Cancel booking']
+      : undefined;
+    const reply = (disclosure ? disclosure + '\n\n' : '') + phrase;
     await logBot(reply);
-    return { reply: (disclosure ? disclosure + '\n\n' : '') + reply, debug };
+    return { reply, buttons, debug };
   }
 
-  const reply = first.text || 'Sorry, could you say that another way?';
+  const replyText = first.text || 'Sorry, could you say that another way?';
+  // First message: append welcome menu buttons
+  const welcomeButtons = disclosure ? ['📅 Book appointment', '💬 Ask a question', '👤 Talk to staff'] : undefined;
+  const reply = (disclosure ? disclosure + '\n\n' : '') + replyText;
   await logBot(reply);
-  return { reply: (disclosure ? disclosure + '\n\n' : '') + reply, debug };
+  return { reply, buttons: welcomeButtons, debug };
 }
 
 async function resetPatient(from) {
