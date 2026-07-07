@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clinic Bot Tester</title>
+<style>
+  :root { --wa:#25d366; --wabg:#0b141a; --bubble-in:#202c33; --bubble-out:#005c4b; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; background:#111b21; color:#e9edef; }
+  .wrap { display:flex; gap:16px; max-width:1100px; margin:0 auto; padding:16px; height:100vh; }
+  .phone { width:400px; display:flex; flex-direction:column; background:var(--wabg); border-radius:12px; overflow:hidden; box-shadow:0 8px 30px rgba(0,0,0,.4); }
+  .hdr { background:#202c33; padding:12px 16px; display:flex; align-items:center; gap:10px; }
+  .avatar { width:36px;height:36px;border-radius:50%;background:var(--wa);display:flex;align-items:center;justify-content:center;font-size:18px; }
+  .hdr .t { font-weight:600; } .hdr .s { font-size:12px; color:#8696a0; }
+  .msgs { flex:1; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:8px; background-image:linear-gradient(rgba(11,20,26,.95),rgba(11,20,26,.95)); }
+  .b { max-width:78%; padding:7px 10px; border-radius:8px; font-size:14px; line-height:1.35; white-space:pre-wrap; word-wrap:break-word; }
+  .in { background:var(--bubble-in); align-self:flex-start; border-top-left-radius:2px; }
+  .out { background:var(--bubble-out); align-self:flex-end; border-top-right-radius:2px; }
+  .sys { align-self:center; font-size:12px; color:#8696a0; background:#182229; padding:4px 10px; border-radius:10px; }
+  .inbar { display:flex; gap:8px; padding:10px; background:#202c33; }
+  .inbar input { flex:1; border:0; border-radius:20px; padding:10px 14px; background:#2a3942; color:#e9edef; font-size:14px; }
+  .inbar button { border:0; background:var(--wa); color:#04220f; font-weight:700; border-radius:20px; padding:0 16px; cursor:pointer; }
+  .panel { flex:1; background:#0e1a20; border-radius:12px; padding:16px; overflow-y:auto; }
+  .panel h2 { margin:0 0 8px; font-size:14px; color:#8696a0; text-transform:uppercase; letter-spacing:.05em; }
+  .chip { display:inline-block; padding:2px 8px; border-radius:10px; font-size:12px; font-weight:700; margin-right:6px; }
+  .chip.bot{background:#0e3b2e;color:#4be3a0} .chip.emergency{background:#4a1414;color:#ff7b72} .chip.human{background:#3a2f0e;color:#f1c40f}
+  pre { background:#0b141a; padding:10px; border-radius:8px; font-size:12px; overflow-x:auto; color:#c9d1d9; }
+  .quick { display:flex; flex-wrap:wrap; gap:6px; padding:8px 10px; background:#182229; }
+  .quick button { font-size:12px; background:#2a3942; color:#e9edef; border:0; border-radius:12px; padding:5px 10px; cursor:pointer; }
+  .wa-btns { display:flex; flex-wrap:wrap; gap:6px; padding:4px 0 2px; }
+  .wa-btn { font-size:13px; font-weight:600; color:#53bdeb; background:transparent; border:1px solid #2a3942; border-radius:8px; padding:6px 14px; cursor:pointer; width:100%; text-align:center; }
+  .wa-btn:hover { background:#182229; }
+  .muted { color:#8696a0; font-size:12px; }
+  a { color:#53bdeb; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="phone">
+    <div class="hdr">
+      <div class="avatar">🦷</div>
+      <div><div class="t">Test Dental Clinic</div><div class="s" id="status">connecting…</div></div>
+    </div>
+    <div class="msgs" id="msgs"></div>
+    <div class="quick" id="quick"></div>
+    <div class="inbar">
+      <input id="input" placeholder="Type a message…" autocomplete="off">
+      <button id="send">Send</button>
+    </div>
+  </div>
+  <div class="panel">
+    <h2>Pipeline debug</h2>
+    <div id="dbg" class="muted">Send a message to see how it flows through triage → RAG → Claude → action.</div>
+    <div style="margin-top:16px"><button id="reset" style="background:#2a3942;color:#e9edef;border:0;border-radius:8px;padding:8px 12px;cursor:pointer">↺ Reset conversation</button>
+    <div class="muted" style="margin-top:6px">Clears this test patient so the next message triggers the first-time disclosure again.</div></div>
+  </div>
+</div>
+<script>
+const FROM = 'webtest';
+const msgs = document.getElementById('msgs');
+const dbg = document.getElementById('dbg');
+const input = document.getElementById('input');
+
+const QUICK = [
+  'What are your opening hours?',
+  'How much is a cleaning?',
+  'Can I book something Tuesday afternoon?',
+  'I have severe pain and swelling',
+  'Can I speak to a person?',
+];
+const quick = document.getElementById('quick');
+QUICK.forEach(q => { const b=document.createElement('button'); b.textContent=q; b.onclick=()=>{input.value=q; send();}; quick.appendChild(b); });
+
+function bubble(text, cls){ const d=document.createElement('div'); d.className='b '+cls; d.textContent=text; msgs.appendChild(d); msgs.scrollTop=msgs.scrollHeight; return d; }
+function sys(text){ const d=document.createElement('div'); d.className='sys'; d.textContent=text; msgs.appendChild(d); msgs.scrollTop=msgs.scrollHeight; }
+
+async function health(){
+  try { const h = await (await fetch('/api/health')).json();
+    document.getElementById('status').textContent =
+      (h.has_llm ? h.provider + ' · ' + h.gen_model : 'no LLM key (stub)') + ' · ' + (h.rag ? 'RAG ✓' : 'RAG ✗');
+  } catch { document.getElementById('status').textContent = 'server unreachable'; }
+}
+health();
+
+async function send(){
+  const text = input.value.trim(); if(!text) return;
+  input.value=''; bubble(text,'out');
+  const typing = bubble('…','in');
+  try {
+    const r = await fetch('/api/message',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({from:FROM,text})});
+    const j = await r.json();
+    typing.textContent = j.reply;
+    renderDebug(j.debug);
+  } catch(e){ typing.textContent='(error: '+e.message+')'; }
+}
+document.getElementById('send').onclick=send;
+input.addEventListener('keydown',e=>{ if(e.key==='Enter') send(); });
+
+document.getElementById('reset').onclick=async()=>{
+  await fetch('/api/reset',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({from:FROM})});
+  msgs.innerHTML=''; dbg.innerHTML='<span class="muted">Conversation reset — next message gets the disclosure.</span>';
+  sys('— conversation reset —');
+};
+
+function renderDebug(d){
+  if(!d){ dbg.textContent='(no debug)'; return; }
+  let html = '';
+  const route = d.route||'?';
+  html += `<div><span class="chip ${route}">route: ${route}</span>`;
+  if(d.first_message) html += `<span class="chip bot">first message → disclosure</span>`;
+  html += `</div>`;
+  html += `<p class="muted">keys — Claude: ${d.keys?.anthropic?'set':'missing'} · OpenAI: ${d.keys?.openai?'set':'missing'}</p>`;
+  if(d.steps?.length) html += '<h2>steps</h2><ul class="muted">'+d.steps.map(s=>'<li>'+s+'</li>').join('')+'</ul>';
+  if(d.rag?.length){ html += '<h2>RAG hits</h2><pre>'+d.rag.map(r=>`[${r.category}] ${r.similarity}  ${r.content}`).join('\n')+'</pre>'; }
+  if(d.tool){ html += '<h2>tool call</h2><pre>'+JSON.stringify(d.tool,null,2)+'</pre>'; }
+  if(d.action_result){ html += '<h2>action result</h2><pre>'+JSON.stringify(d.action_result,null,2)+'</pre>'; }
+  dbg.innerHTML = html;
+}
+</script>
+</body>
+</html>

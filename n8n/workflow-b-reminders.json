@@ -1,0 +1,70 @@
+{
+  "name": "WhatsApp Clinic - Reminders",
+  "nodes": [
+    {
+      "parameters": { "rule": { "interval": [ { "field": "hours", "hoursInterval": 1 } ] } },
+      "id": "cron",
+      "name": "Every hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-600, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Appointments ~24h out (not yet reminded) and ~2h out (not yet reminded).\n-- One row per due reminder; `which` tells the sender which flag to clear.\nselect a.id, a.scheduled_at, a.service_type, a.status,\n       p.whatsapp_number, c.phone_number_id, c.timezone, c.name as clinic_name,\n       '24h' as which\nfrom appointments a\njoin patients p on p.id = a.patient_id\njoin clinics c on c.id = a.clinic_id\nwhere a.status in ('booked','confirmed','rescheduled')\n  and a.reminder_24h_sent = false\n  and a.scheduled_at between now() + interval '23 hours' and now() + interval '25 hours'\nunion all\nselect a.id, a.scheduled_at, a.service_type, a.status,\n       p.whatsapp_number, c.phone_number_id, c.timezone, c.name as clinic_name,\n       '2h' as which\nfrom appointments a\njoin patients p on p.id = a.patient_id\njoin clinics c on c.id = a.clinic_id\nwhere a.status in ('booked','confirmed','rescheduled')\n  and a.reminder_2h_sent = false\n  and a.scheduled_at between now() + interval '90 minutes' and now() + interval '150 minutes';",
+        "options": {}
+      },
+      "id": "due",
+      "name": "Find Due Reminders",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [-380, 0],
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the WhatsApp template payload + the SQL to mark the reminder sent\n// (Spec 4.3 / 6.2). Business-initiated messages outside the 24h session window\n// must use a pre-approved template (see whatsapp/templates/appointment_reminder.json).\nreturn $input.all().map((item) => {\n  const a = item.json;\n  const when = new Date(a.scheduled_at).toLocaleString('en-GB', { timeZone: a.timezone || 'UTC', weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });\n  const template = {\n    messaging_product: 'whatsapp',\n    to: a.whatsapp_number,\n    type: 'template',\n    template: {\n      name: 'appointment_reminder',\n      language: { code: 'en' },\n      components: [\n        { type: 'body', parameters: [ { type: 'text', text: a.clinic_name }, { type: 'text', text: when } ] },\n        { type: 'button', sub_type: 'quick_reply', index: '0', parameters: [ { type: 'payload', payload: 'CONFIRM_' + a.id } ] },\n        { type: 'button', sub_type: 'quick_reply', index: '1', parameters: [ { type: 'payload', payload: 'RESCHEDULE_' + a.id } ] }\n      ]\n    }\n  };\n  const col = a.which === '24h' ? 'reminder_24h_sent' : 'reminder_2h_sent';\n  const markSql = `update appointments set ${col} = true where id = '${a.id}';`;\n  return { json: { phone_number_id: a.phone_number_id, template, markSql, appointment_id: a.id, which: a.which } };\n});"
+      },
+      "id": "build",
+      "name": "Build Template + Mark SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-160, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v21.0/{{ $json.phone_number_id }}/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true, "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.template) }}",
+        "options": {}
+      },
+      "id": "send",
+      "name": "Send Reminder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [60, 0],
+      "credentials": {}
+    },
+    {
+      "parameters": { "operation": "executeQuery", "query": "={{ $('Build Template + Mark SQL').item.json.markSql }}", "options": {} },
+      "id": "mark",
+      "name": "Mark Sent",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [280, 0],
+      "credentials": {}
+    }
+  ],
+  "connections": {
+    "Every hour": { "main": [[{ "node": "Find Due Reminders", "type": "main", "index": 0 }]] },
+    "Find Due Reminders": { "main": [[{ "node": "Build Template + Mark SQL", "type": "main", "index": 0 }]] },
+    "Build Template + Mark SQL": { "main": [[{ "node": "Send Reminder", "type": "main", "index": 0 }]] },
+    "Send Reminder": { "main": [[{ "node": "Mark Sent", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": false
+}

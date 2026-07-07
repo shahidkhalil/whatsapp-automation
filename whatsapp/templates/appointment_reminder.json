@@ -1,0 +1,20 @@
+{
+  "_note": "WhatsApp Cloud API message template for business-initiated reminders (Spec 4.3 / 8). Submit for approval in Meta Business Manager > WhatsApp Manager > Message templates, or via POST /{whatsapp_business_account_id}/message_templates. Meta approval can take time — start early (Open Question 2).",
+  "name": "appointment_reminder",
+  "language": "en",
+  "category": "UTILITY",
+  "components": [
+    {
+      "type": "BODY",
+      "text": "Reminder from {{1}}: you have an appointment on {{2}}. Please confirm, or tap Reschedule if the time no longer works.",
+      "example": { "body_text": [["Test Dental Clinic", "Tue, 8 Jul 14:30"]] }
+    },
+    {
+      "type": "BUTTONS",
+      "buttons": [
+        { "type": "QUICK_REPLY", "text": "Confirm" },
+        { "type": "QUICK_REPLY", "text": "Reschedule" }
+      ]
+    }
+  ]
+}
